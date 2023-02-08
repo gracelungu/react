@@ -15,6 +15,7 @@ describe('ReactDOMNestedEvents', () => {
   let Scheduler;
   let act;
   let useState;
+  let dispatchCustomEvent;
 
   beforeEach(() => {
     jest.resetModules();
@@ -23,9 +24,17 @@ describe('ReactDOMNestedEvents', () => {
     Scheduler = require('scheduler');
     act = require('jest-react').act;
     useState = React.useState;
+    dispatchCustomEvent = (el) => {
+      // Jest doesn't set window.event for custom events
+      const prevEvent = window.event;
+      const customEvent = new Event('custom');
+      window.event = customEvent;
+      el.dispatchEvent(customEvent);
+      window.event = prevEvent;     
+    };
   });
 
-  test('nested event dispatches should not cause updates to flush', async () => {
+  it('nested event dispatches should not cause updates to flush', async () => {
     const buttonRef = React.createRef(null);
     function App() {
       const [isClicked, setIsClicked] = useState(false);
@@ -72,4 +81,102 @@ describe('ReactDOMNestedEvents', () => {
     ]);
     expect(buttonRef.current.innerHTML).toEqual('Clicked: true, Focused: true');
   });
+
+  fit('custom events inside a discrete event is batched with sync updates and flushed synchronously', async () => {
+    const buttonRef = React.createRef(null);
+    function App() {
+      const [isClicked, setIsClicked] = useState(false);
+      const [isCustom, setIsCustom] = useState(false);
+      const onClick = () => {
+        setIsClicked(true);
+        dispatchCustomEvent(buttonRef.current);
+      };
+      const onCustomEvent = ()  => {
+        console.log(window.event.type);
+        setIsCustom(true);
+      }
+      React.useEffect(() => {
+        buttonRef.current.addEventListener('custom', onCustomEvent);
+        return () => {
+          buttonRef.current.removeEventListener('custom', onCustomEvent);
+        }
+      }, []);
+      Scheduler.unstable_yieldValue(
+        `render: ${isClicked} / ${isCustom}`,
+      );
+      return <button ref={buttonRef} onClick={onClick}/>;
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = ReactDOMClient.createRoot(container);
+
+    await act(async () => {
+      root.render(<App />);
+    });
+    expect(Scheduler).toHaveYielded([
+      "render: false / false",
+    ]);
+
+    await act(async () => {
+      buttonRef.current.click();
+    });
+    expect(Scheduler).toHaveYielded([
+      "render: true / true",
+    ]);
+  })
+
+  fit('custom events inside a discrete event flushes synchronously', async () => {
+    const buttonRef = React.createRef(null);
+    function App() {
+      const [isClicked, setIsClicked] = useState(false);
+      const [isCustom, setIsCustom] = useState(false);
+      const onClick = () => {
+        // Make `setIsClicked` not sync
+        dispatchCustomEvent(buttonRef.current);
+      };
+      const onCustomEvent = ()  => {
+        console.log('set custom', window.event);
+        setIsCustom(true);
+      }
+      React.useEffect(() => {
+        buttonRef.current.addEventListener('custom', onCustomEvent);
+        return () => {
+          buttonRef.current.removeEventListener('custom', onCustomEvent);
+        }
+      }, []);
+      Scheduler.unstable_yieldValue(
+        `render: ${isClicked} / ${isCustom}`,
+      );
+      return <button ref={buttonRef} onClick={onClick}/>;
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = ReactDOMClient.createRoot(container);
+
+    await act(async () => {
+      root.render(<App />);
+    });
+    expect(Scheduler).toHaveYielded([
+      "render: false / false",
+    ]);
+
+    await act(async () => {
+      queueMicrotask(() => {
+        Scheduler.unstable_yieldValue('Sync');
+      })
+      Scheduler.unstable_scheduleCallback(
+        Scheduler.unstable_ImmediatePriority,
+        () => {
+          Scheduler.unstable_yieldValue('Immediate');
+          },
+      );
+      buttonRef.current.click();
+    });
+
+    expect(Scheduler).toHaveYielded([
+      "render: false / true",
+    ]);
+  })
 });
